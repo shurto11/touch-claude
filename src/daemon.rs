@@ -1,4 +1,4 @@
-use crate::{fb::Framebuffer, img, state, touch};
+use crate::{fb::Framebuffer, font, img, state, touch};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -12,10 +12,17 @@ use std::time::{Duration, Instant};
 /// 基準の表示サイズ(幅128px、高さは元画像514:318の比率)
 pub const BASE_W: u32 = 128;
 pub const BASE_H: u32 = 79;
+/// キャラ上部のモデル名ラベル帯の高さ(フォント7px×2倍 + 下余白2px)
+pub const LABEL_H: u32 = 16;
+/// 1行の高さ(ラベル帯 + キャラ)
+pub const ROW_H: u32 = LABEL_H + BASE_H;
 /// 縦積みの行間
 pub const GAP: u32 = 6;
 /// 走りアニメーションの上下量(px)
 const BOB: u32 = 5;
+/// ラベルの文字拡大率と色(B,G,R)
+const LABEL_SCALE: u32 = 2;
+const LABEL_COLOR: (u8, u8, u8) = (255, 255, 255);
 
 /// 質問中(青) / 終了(黄) / 確認済み(灰) のボディ色 (B,G,R)
 const BLUE: (u8, u8, u8) = (217, 144, 74); // #4A90D9
@@ -37,6 +44,8 @@ pub struct Entry {
     pub started: Instant,
     /// 終了(Done)時に固定した経過分。幅をそれ以上伸ばさないための凍結値
     pub done_mins: u64,
+    /// キャラ上部に表示するモデル名ラベル(例: "FABLE")。不明なら空
+    pub model: String,
 }
 
 impl Entry {
@@ -63,10 +72,18 @@ impl Model {
         self.entries.iter_mut().find(|e| e.pane == pane)
     }
 
-    pub fn apply(&mut self, cmd: &str, pane: &str) {
+    pub fn apply(&mut self, cmd: &str, pane: &str, model: Option<&str>) {
         // 「途中で消えた」系の追跡ができるよう、状態が動くコマンドはログに残す
         if cmd != "answer" {
             eprintln!("[touch-claude] cmd={cmd} pane={pane}");
+        }
+        // モデル名はどのhookからでも届き得るので、分かった時点で既存エントリへ反映する
+        // (セッション開始直後はtranscriptにまだassistantメッセージが無く、空のことがある)
+        let label = model.map(model_label).unwrap_or_default();
+        if !label.is_empty() {
+            if let Some(e) = self.find(pane) {
+                e.model = label.clone();
+            }
         }
         match cmd {
             "start" => {
@@ -80,6 +97,7 @@ impl Model {
                         st: St::Run,
                         started: Instant::now(),
                         done_mins: 0,
+                        model: label,
                     });
                 }
             }
@@ -117,6 +135,27 @@ impl Model {
             _ => {}
         }
     }
+}
+
+/// モデルIDから表示ラベル(大文字)へ。例: claude-fable-5 → FABLE
+fn model_label(id: &str) -> String {
+    for (key, label) in [
+        ("fable", "FABLE"),
+        ("mythos", "MYTHOS"),
+        ("opus", "OPUS"),
+        ("sonnet", "SONNET"),
+        ("haiku", "HAIKU"),
+    ] {
+        if id.contains(key) {
+            return label.to_string();
+        }
+    }
+    // 未知のモデルは "claude-" の次のセグメントを大文字で表示する
+    if let Some(i) = id.find("claude-") {
+        let name: String = id[i + 7..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        return name.to_ascii_uppercase();
+    }
+    String::new()
 }
 
 pub fn run() -> Result<()> {
@@ -177,7 +216,7 @@ pub fn run() -> Result<()> {
         let margin = cached_margin;
         tick += 1;
 
-        let rows: Vec<(String, u32, (u8, u8, u8), bool)> = {
+        let rows: Vec<(String, u32, (u8, u8, u8), bool, String)> = {
             let m = model.lock().unwrap();
             m.entries
                 .iter()
@@ -188,15 +227,15 @@ pub fn run() -> Result<()> {
                         St::Done => YELLOW,
                         St::Seen => GRAY,
                     };
-                    (e.pane.clone(), e.width(lw), color, e.st == St::Run)
+                    (e.pane.clone(), e.width(lw), color, e.st == St::Run, e.model.clone())
                 })
                 .collect()
         };
-        // 右端固定で右上から縦積み
+        // 右端固定で右上から縦積み(各行=ラベル帯+キャラ)
         let rects: Vec<(u8, u32, u32, u32, u32)> = rows
             .iter()
             .enumerate()
-            .map(|(i, (_, w, _, _))| (rotate, lw - w, margin + i as u32 * (BASE_H + GAP), *w, BASE_H))
+            .map(|(i, (_, w, _, _, _))| (rotate, lw - w, margin + i as u32 * (ROW_H + GAP), *w, ROW_H))
             .collect();
 
         if rects != drawn {
@@ -212,12 +251,20 @@ pub fn run() -> Result<()> {
         }
         // 走りアニメーションの位相(300msごとに切り替え)
         let phase = (tick / 2) % 2 == 1;
-        for (&(r, x, y, w, h), (pane, _, color, animate)) in rects.iter().zip(rows.iter()) {
-            let frame = if *animate {
-                run_frame(&sprite, w, h, *color, phase)
+        for (&(r, x, y, w, h), (pane, _, color, animate, label)) in rects.iter().zip(rows.iter()) {
+            let body = if *animate {
+                run_frame(&sprite, w, BASE_H, *color, phase)
             } else {
-                sprite.render(w, h, *color)
+                sprite.render(w, BASE_H, *color)
             };
+            // ラベル帯(上LABEL_H px) + キャラ(下BASE_H px)を1フレームに合成
+            let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
+            frame[(LABEL_H * w * 4) as usize..].copy_from_slice(&body);
+            if !label.is_empty() {
+                // キャラと同じく右寄せ(右端に少し余白)
+                let tx = w.saturating_sub(font::text_width(label, LABEL_SCALE) + 4);
+                font::draw_text(&mut frame, w, LABEL_H, tx, 0, label, LABEL_SCALE, LABEL_COLOR);
+            }
             // 前フレームで不透明だったのに今回透明になったピクセルを黒で消してから描く
             let composed = match last_frames.get(pane) {
                 Some(prev) if prev.len() == frame.len() => {
@@ -333,6 +380,9 @@ struct Msg {
     cmd: String,
     #[serde(default)]
     pane: Option<String>,
+    /// hookが拾ったモデルID(例: claude-fable-5)。不明ならnull
+    #[serde(default)]
+    model: Option<String>,
 }
 
 fn accept_loop(listener: UnixListener, model: Arc<Mutex<Model>>, term: Arc<AtomicBool>) {
@@ -359,9 +409,10 @@ fn accept_loop(listener: UnixListener, model: Arc<Mutex<Model>>, term: Arc<Atomi
                         St::Seen => "seen",
                     };
                     s.push_str(&format!(
-                        "{} {} elapsed={}s width={}px\n",
+                        "{} {} model={} elapsed={}s width={}px\n",
                         e.pane,
                         st,
+                        if e.model.is_empty() { "?" } else { &e.model },
                         e.started.elapsed().as_secs(),
                         e.width(u32::MAX)
                     ));
@@ -373,7 +424,7 @@ fn accept_loop(listener: UnixListener, model: Arc<Mutex<Model>>, term: Arc<Atomi
             }
             cmd => {
                 if let Some(pane) = msg.pane.as_deref() {
-                    model.lock().unwrap().apply(cmd, pane);
+                    model.lock().unwrap().apply(cmd, pane, msg.model.as_deref());
                 }
             }
         }

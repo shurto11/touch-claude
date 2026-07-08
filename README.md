@@ -18,6 +18,9 @@ claude が動くウィンドウ・ペインへ遷移する。
   上限なしで伸び続け、画面左端に達したら止まる。
 - 複数の claude が動いていると、開始順に右上から縦に並ぶ。
 - 基準サイズは幅128px。白背景は透明として端末表示を透過する。
+- キャラの上にモデル名(FABLE / OPUS など)を白のピクセルフォントで表示する。
+  hooks の stdin (transcript_path) から直近のモデルIDを拾うため、
+  セッション開始直後など不明な間は表示されない。
 
 ## 仕組み
 
@@ -25,7 +28,8 @@ claude が動くウィンドウ・ペインへ遷移する。
   5px上下する走りアニメーション、前フレームとの差分を黒で消して残像を防ぐ)・
   touch-server クライアント。`~/.fbtermrc` の `screen-rotate` に追従して縦画面でも
   「見た目の右上」に描く。
-- `touch-claude hook-*` : hooks から呼ばれる軽量クライアント。`$TMUX_PANE` を添えて
+- `touch-claude hook-*` : hooks から呼ばれる軽量クライアント。`$TMUX_PANE` と、
+  hook入力JSONの `transcript_path` 末尾から拾ったモデルIDを添えて
   Unix socket (`$XDG_RUNTIME_DIR/touch-claude.sock`) でデーモンへ通知するだけ。
   `hook-start` はデーモン未起動なら `setsid` で切り離して自動起動する。
 - タッチ: touch-server に表示領域を region 申告する overlay 方式(spotatui-pip /
@@ -61,6 +65,7 @@ cargo build --release
 - `src/main.rs` — サブコマンド分岐
 - `src/daemon.rs` — 常駐デーモン(状態管理・描画ループ・コマンド受付)
 - `src/fb.rs` — fb0直描画。論理座標(回転後の画面)→物理座標の変換と透明ブリット
+- `src/font.rs` — モデル名ラベル用の5x7ピクセルフォント(大文字A-Z)
 - `src/img.rs` — clawd02.pngの3色分類・変倍・ボディ色差し替え
 - `src/touch.rs` — touch-serverクライアント(region申告・タップでペイン遷移)
 - `src/hooks.rs` — hooksから呼ばれる通知クライアント

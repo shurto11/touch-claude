@@ -4,7 +4,7 @@
 
 use crate::state;
 use anyhow::{bail, Context, Result};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -12,7 +12,8 @@ use std::time::Duration;
 pub fn send(cmd: &str, ensure_daemon: bool) -> Result<()> {
     // tmux外で動くclaudeは対象外
     let Ok(pane) = std::env::var("TMUX_PANE") else { return Ok(()) };
-    let line = serde_json::json!({"cmd": cmd, "pane": pane}).to_string() + "\n";
+    let model = model_from_stdin();
+    let line = serde_json::json!({"cmd": cmd, "pane": pane, "model": model}).to_string() + "\n";
     if try_send(&line).is_ok() {
         return Ok(());
     }
@@ -27,6 +28,38 @@ pub fn send(cmd: &str, ensure_daemon: bool) -> Result<()> {
         }
     }
     bail!("daemonに接続できません");
+}
+
+/// hookのstdin JSONからtranscript_pathを取り、直近のモデルIDを返す。
+/// 手動実行時はstdinがTTYなので読まない(ブロック防止)。
+/// hookは即returnが必須なため、失敗はすべてNoneに落とす。
+fn model_from_stdin() -> Option<String> {
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut s = String::new();
+    stdin.read_to_string(&mut s).ok()?;
+    let v: serde_json::Value = serde_json::from_str(s.trim()).ok()?;
+    last_model(v.get("transcript_path")?.as_str()?)
+}
+
+/// transcript(JSONL)の末尾64KiBから最後の "model":"claude-..." を拾う。
+/// assistantメッセージのmodelフィールドが対象。"<synthetic>"などは除外する。
+fn last_model(path: &str) -> Option<String> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    text.match_indices("\"model\":\"")
+        .filter_map(|(i, m)| {
+            let rest = &text[i + m.len()..];
+            let id = &rest[..rest.find('"')?];
+            id.contains("claude").then(|| id.to_string())
+        })
+        .last()
 }
 
 fn try_send(line: &str) -> Result<()> {

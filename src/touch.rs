@@ -5,7 +5,7 @@
 //! 申告できないため、表示の増減・拡大で変わったら接続を張り直して更新する。
 //! タップされた行のclaudeが動くtmuxペインへ遷移する。
 
-use crate::daemon::{top_margin, Model, BASE_H, GAP};
+use crate::daemon::{top_margin, Model, GAP, ROW_H};
 use crate::state;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,7 @@ fn current_region(model: &Arc<Mutex<Model>>) -> Option<FracRect> {
     }
     let margin = top_margin(lh);
     let max_w = m.entries.iter().map(|e| e.width(lw)).max().unwrap_or(0);
-    let bottom = (margin + m.entries.len() as u32 * (BASE_H + GAP)).min(lh);
+    let bottom = (margin + m.entries.len() as u32 * (ROW_H + GAP)).min(lh);
     Some(FracRect {
         left: (lw - max_w) as f64 / lw as f64,
         top: margin.min(lh) as f64 / lh as f64,
@@ -142,13 +142,13 @@ fn handle_line(line: &[u8], model: &Arc<Mutex<Model>>) {
     if y < margin {
         return; // ステータスバー上のタップは対象外
     }
-    let row = ((y - margin) / (BASE_H + GAP)) as usize;
+    let row = ((y - margin) / (ROW_H + GAP)) as usize;
     let pane = {
         let mut m = model.lock().unwrap();
         let pane = m.entries.get(row).map(|e| e.pane.clone());
         if let Some(p) = &pane {
             // 終了(黄)のタッチは「確認済み」として灰色にする
-            m.apply("seen", p);
+            m.apply("seen", p, None);
         }
         pane
     };
