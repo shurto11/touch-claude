@@ -143,7 +143,15 @@ fn handle_line(line: &[u8], model: &Arc<Mutex<Model>>) {
         return; // ステータスバー上のタップは対象外
     }
     let row = ((y - margin) / (BASE_H + GAP)) as usize;
-    let pane = model.lock().unwrap().entries.get(row).map(|e| e.pane.clone());
+    let pane = {
+        let mut m = model.lock().unwrap();
+        let pane = m.entries.get(row).map(|e| e.pane.clone());
+        if let Some(p) = &pane {
+            // 終了(黄)のタッチは「確認済み」として灰色にする
+            m.apply("seen", p);
+        }
+        pane
+    };
     if let Some(pane) = pane {
         goto_pane(&pane);
     }

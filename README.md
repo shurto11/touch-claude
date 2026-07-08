@@ -11,6 +11,7 @@ claude が動くウィンドウ・ペインへ遷移する。
 | 処理中 | オレンジ | `UserPromptSubmit` |
 | 質問・許可待ち | 青 | `Notification` / `PreToolUse: AskUserQuestion\|ExitPlanMode` |
 | 処理終了 | 黄 | `Stop` (次のプロンプトでオレンジに戻る)。終了後のアイドル通知(60秒放置のNotification)では青にならない |
+| 確認済み | 灰 | 終了(黄)をタッチしたとき。次のプロンプトでオレンジに戻る |
 | (消える) | - | `SessionEnd` またはペイン消滅 |
 
 - 処理が1分続くごとに横幅が基準の+5%ずつ伸びる(右端固定・左へ拡大、20分で2倍)。

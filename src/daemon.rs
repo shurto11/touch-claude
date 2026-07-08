@@ -14,15 +14,18 @@ pub const BASE_H: u32 = 79;
 /// 縦積みの行間
 pub const GAP: u32 = 6;
 
-/// 質問中(青) / 終了(黄) のボディ色 (B,G,R)
+/// 質問中(青) / 終了(黄) / 確認済み(灰) のボディ色 (B,G,R)
 const BLUE: (u8, u8, u8) = (217, 144, 74); // #4A90D9
 const YELLOW: (u8, u8, u8) = (76, 201, 242); // #F2C94C
+const GRAY: (u8, u8, u8) = (158, 158, 158); // #9E9E9E
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum St {
     Run,
     Ask,
     Done,
+    /// 終了(黄)をタッチで確認した後の状態。次のstartでRunに戻る
+    Seen,
 }
 
 pub struct Entry {
@@ -38,7 +41,7 @@ impl Entry {
     /// 上限なしで伸び続け、左端が論理画面の左端に達したら止まる(=max_w)
     pub fn width(&self, max_w: u32) -> u32 {
         let mins = match self.st {
-            St::Done => self.done_mins,
+            St::Done | St::Seen => self.done_mins,
             _ => self.started.elapsed().as_secs() / 60,
         };
         let w = BASE_W as u64 + BASE_W as u64 * 5 * mins / 100;
@@ -57,7 +60,7 @@ impl Model {
         self.entries.iter_mut().find(|e| e.pane == pane)
     }
 
-    fn apply(&mut self, cmd: &str, pane: &str) {
+    pub fn apply(&mut self, cmd: &str, pane: &str) {
         match cmd {
             "start" => {
                 if let Some(e) = self.find(pane) {
@@ -93,6 +96,14 @@ impl Model {
                 if let Some(e) = self.find(pane) {
                     e.done_mins = e.started.elapsed().as_secs() / 60;
                     e.st = St::Done;
+                }
+            }
+            // タッチで終了(黄)を確認 → 灰色。次のstartでオレンジに戻る
+            "seen" => {
+                if let Some(e) = self.find(pane) {
+                    if e.st == St::Done {
+                        e.st = St::Seen;
+                    }
                 }
             }
             "end" => self.entries.retain(|e| e.pane != pane),
@@ -159,6 +170,7 @@ pub fn run() -> Result<()> {
                         St::Run => sprite.body,
                         St::Ask => BLUE,
                         St::Done => YELLOW,
+                        St::Seen => GRAY,
                     };
                     (e.width(lw), color)
                 })
@@ -268,6 +280,7 @@ fn accept_loop(listener: UnixListener, model: Arc<Mutex<Model>>, term: Arc<Atomi
                         St::Run => "run",
                         St::Ask => "ask",
                         St::Done => "done",
+                        St::Seen => "seen",
                     };
                     s.push_str(&format!(
                         "{} {} elapsed={}s width={}px\n",
