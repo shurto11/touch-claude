@@ -64,6 +64,10 @@ impl Model {
     }
 
     pub fn apply(&mut self, cmd: &str, pane: &str) {
+        // 「途中で消えた」系の追跡ができるよう、状態が動くコマンドはログに残す
+        if cmd != "answer" {
+            eprintln!("[touch-claude] cmd={cmd} pane={pane}");
+        }
         match cmd {
             "start" => {
                 if let Some(e) = self.find(pane) {
@@ -290,20 +294,38 @@ pub fn top_margin(lh: u32) -> u32 {
     lines * cell + 2
 }
 
-/// tmuxから消えたペインのエントリを掃除する
+/// tmuxから消えたペインのエントリを掃除する。
+/// コマンドの一時的な失敗で全エントリを消さないよう、
+/// 「サーバー不在」が明示されたときだけ全消しする。
 fn prune(model: &Arc<Mutex<Model>>) {
-    let out = Command::new("tmux")
+    let Ok(o) = Command::new("tmux")
         .args(["list-panes", "-a", "-F", "#{pane_id}"])
-        .output();
-    let alive: Vec<String> = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|s| s.trim().to_string())
-            .collect(),
-        // tmuxサーバー不在=全ペイン消滅
-        _ => Vec::new(),
+        .output()
+    else {
+        return; // tmuxを起動できない一時障害。次回に持ち越す
     };
-    model.lock().unwrap().entries.retain(|e| alive.contains(&e.pane));
+    if !o.status.success() {
+        let err = String::from_utf8_lossy(&o.stderr);
+        if err.contains("no server running") || err.contains("error connecting") {
+            let mut m = model.lock().unwrap();
+            if !m.entries.is_empty() {
+                eprintln!("[touch-claude] prune: tmuxサーバー不在のため全{}件を削除", m.entries.len());
+                m.entries.clear();
+            }
+        }
+        return;
+    }
+    let alive: Vec<String> = String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .collect();
+    model.lock().unwrap().entries.retain(|e| {
+        let keep = alive.contains(&e.pane);
+        if !keep {
+            eprintln!("[touch-claude] prune: ペイン消滅につき削除 {}", e.pane);
+        }
+        keep
+    });
 }
 
 #[derive(Deserialize)]
