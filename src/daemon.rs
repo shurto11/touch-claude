@@ -1,6 +1,7 @@
 use crate::{fb::Framebuffer, img, state, touch};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
@@ -13,6 +14,8 @@ pub const BASE_W: u32 = 128;
 pub const BASE_H: u32 = 79;
 /// 縦積みの行間
 pub const GAP: u32 = 6;
+/// 走りアニメーションの上下量(px)
+const BOB: u32 = 5;
 
 /// 質問中(青) / 終了(黄) / 確認済み(灰) のボディ色 (B,G,R)
 const BLUE: (u8, u8, u8) = (217, 144, 74); // #4A90D9
@@ -150,18 +153,27 @@ pub fn run() -> Result<()> {
 
     // 前回描いた矩形(rotate + 論理座標)。変化したら消してから引き直す
     let mut drawn: Vec<(u8, u32, u32, u32, u32)> = Vec::new();
+    // pane→前フレームのボックスバッファ。アニメーションの残像消しに使う
+    let mut last_frames: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut cached_margin = 0u32;
+    let mut prev_rotate = 255u8;
     let mut tick = 0u64;
     while !term.load(Ordering::Relaxed) {
-        // SessionEndを取りこぼしてもペイン消滅で掃除されるように10秒ごとに照合
-        if tick % 10 == 0 {
+        // SessionEndを取りこぼしてもペイン消滅で掃除されるように約10秒ごとに照合
+        if tick % 67 == 0 {
             prune(&model);
         }
-        tick += 1;
-
         let rotate = state::screen_rotate();
         let (lw, lh) = fb.logical_size(rotate);
-        let margin = top_margin(lh);
-        let rows: Vec<(u32, (u8, u8, u8))> = {
+        // top_marginはtmuxを3回呼ぶので約2秒ごとにキャッシュ更新
+        if tick % 13 == 0 || rotate != prev_rotate {
+            cached_margin = top_margin(lh);
+            prev_rotate = rotate;
+        }
+        let margin = cached_margin;
+        tick += 1;
+
+        let rows: Vec<(String, u32, (u8, u8, u8), bool)> = {
             let m = model.lock().unwrap();
             m.entries
                 .iter()
@@ -172,7 +184,7 @@ pub fn run() -> Result<()> {
                         St::Done => YELLOW,
                         St::Seen => GRAY,
                     };
-                    (e.width(lw), color)
+                    (e.pane.clone(), e.width(lw), color, e.st == St::Run)
                 })
                 .collect()
         };
@@ -180,7 +192,7 @@ pub fn run() -> Result<()> {
         let rects: Vec<(u8, u32, u32, u32, u32)> = rows
             .iter()
             .enumerate()
-            .map(|(i, (w, _))| (rotate, lw - w, margin + i as u32 * (BASE_H + GAP), *w, BASE_H))
+            .map(|(i, (_, w, _, _))| (rotate, lw - w, margin + i as u32 * (BASE_H + GAP), *w, BASE_H))
             .collect();
 
         if rects != drawn {
@@ -192,12 +204,33 @@ pub fn run() -> Result<()> {
                 let _ = Command::new("tmux").arg("refresh-client").output();
             }
             drawn = rects.clone();
+            last_frames.clear();
         }
-        for (&(r, x, y, w, h), (_, color)) in rects.iter().zip(rows.iter()) {
-            let buf = sprite.render(w, h, *color);
-            let _ = fb.blit_logical(r, x, y, w, h, &buf);
+        // 走りアニメーションの位相(300msごとに切り替え)
+        let phase = (tick / 2) % 2 == 1;
+        for (&(r, x, y, w, h), (pane, _, color, animate)) in rects.iter().zip(rows.iter()) {
+            let frame = if *animate {
+                run_frame(&sprite, w, h, *color, phase)
+            } else {
+                sprite.render(w, h, *color)
+            };
+            // 前フレームで不透明だったのに今回透明になったピクセルを黒で消してから描く
+            let composed = match last_frames.get(pane) {
+                Some(prev) if prev.len() == frame.len() => {
+                    let mut c = frame.clone();
+                    for i in (0..c.len()).step_by(4) {
+                        if c[i + 3] == 0 && prev[i + 3] != 0 {
+                            c[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                        }
+                    }
+                    c
+                }
+                _ => frame.clone(),
+            };
+            let _ = fb.blit_logical(r, x, y, w, h, &composed);
+            last_frames.insert(pane.clone(), frame);
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(150));
     }
 
     for &(r, x, y, w, h) in &drawn {
@@ -207,6 +240,22 @@ pub fn run() -> Result<()> {
     let _ = std::fs::remove_file(&sock);
     eprintln!("[touch-claude] daemon終了");
     Ok(())
+}
+
+/// 実行中の走りアニメーションの1フレーム。キャラを少し縮めて(h-BOB)、
+/// 位相に応じて上寄せ/下寄せに描くことで、その場で跳ねながら走って見せる
+fn run_frame(sprite: &img::Sprite, w: u32, h: u32, color: (u8, u8, u8), phase: bool) -> Vec<u8> {
+    let hh = h.saturating_sub(BOB).max(1);
+    let dy = if phase { BOB } else { 0 };
+    let spr = sprite.render(w, hh, color);
+    let mut boxbuf = vec![0u8; (w as usize) * (h as usize) * 4];
+    let row_bytes = (w * 4) as usize;
+    for row in 0..hh {
+        let d = ((row + dy) * w * 4) as usize;
+        let s = (row * w * 4) as usize;
+        boxbuf[d..d + row_bytes].copy_from_slice(&spr[s..s + row_bytes]);
+    }
+    boxbuf
 }
 
 /// tmuxステータスバー(status-position top)と重ならないための上マージン。
@@ -228,9 +277,14 @@ pub fn top_margin(lh: u32) -> u32 {
         Some("on") | None => 1,
         Some(n) => n.parse().unwrap_or(1),
     };
+    // クライアントが複数いる場合は最小行数(=最大セル高)を採用して順序に依らず安全側へ
     let cell = get(&["list-clients", "-F", "#{client_height}"])
-        .and_then(|s| s.lines().next()?.trim().parse::<u32>().ok())
-        .filter(|&rows| rows > 0)
+        .and_then(|s| {
+            s.lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .filter(|&rows| rows > 0)
+                .min()
+        })
         .map(|rows| (lh + rows - 1) / rows)
         .unwrap_or(16);
     lines * cell + 2

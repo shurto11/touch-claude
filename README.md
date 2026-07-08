@@ -8,7 +8,7 @@ claude が動くウィンドウ・ペインへ遷移する。
 
 | 状態 | 色 | きっかけ (Claude Code hook) |
 |------|-----|------|
-| 処理中 | オレンジ | `UserPromptSubmit` |
+| 処理中 | オレンジ(跳ねて走るアニメーション) | `UserPromptSubmit` |
 | 質問・許可待ち | 青 | `Notification` / `PreToolUse: AskUserQuestion\|ExitPlanMode` |
 | 処理終了 | 黄 | `Stop` (次のプロンプトでオレンジに戻る)。終了後のアイドル通知(60秒放置のNotification)では青にならない |
 | 確認済み | 灰 | 終了(黄)をタッチしたとき。次のプロンプトでオレンジに戻る |
@@ -21,7 +21,8 @@ claude が動くウィンドウ・ペインへ遷移する。
 
 ## 仕組み
 
-- `touch-claude daemon` : 常駐。状態管理・`/dev/fb0` 直描画(1秒ごとに再ブリット)・
+- `touch-claude daemon` : 常駐。状態管理・`/dev/fb0` 直描画(150ms周期。実行中は300msごとに
+  5px上下する走りアニメーション、前フレームとの差分を黒で消して残像を防ぐ)・
   touch-server クライアント。`~/.fbtermrc` の `screen-rotate` に追従して縦画面でも
   「見た目の右上」に描く。
 - `touch-claude hook-*` : hooks から呼ばれる軽量クライアント。`$TMUX_PANE` を添えて
