@@ -185,7 +185,14 @@ pub fn run() -> Result<()> {
     }
     touch::spawn(Arc::clone(&model));
 
+    // fb-server クライアント起動(表示可否の通知を受け取る)。
+    // アイコン列の外接矩形(物理 fb 座標)を申告し、下位レイヤーに避けさせる。
     let fb = Framebuffer::open()?;
+    let fb_rect: Arc<Mutex<Option<crate::fb_client::Rect>>> = Arc::new(Mutex::new(None));
+    let (vtx, vrx) = std::sync::mpsc::channel::<bool>();
+    crate::fb_client::spawn("touch-claude", Arc::clone(&fb_rect), vtx);
+    let mut visible = true;
+
     let sprite = img::load()?;
     eprintln!(
         "[touch-claude] daemon起動 (pid {}, fb {}x{})",
@@ -202,6 +209,12 @@ pub fn run() -> Result<()> {
     let mut prev_rotate = 255u8;
     let mut tick = 0u64;
     while !term.load(Ordering::Relaxed) {
+        // fb-server からの可視性通知を反映(非表示中は描画せず、rectsを空にして
+        // 既存の「変化したら消す」ロジックに残像クリアを任せる)
+        while let Ok(v) = vrx.try_recv() {
+            visible = v;
+        }
+
         // SessionEndを取りこぼしてもペイン消滅で掃除されるように約10秒ごとに照合
         if tick % 67 == 0 {
             prune(&model);
@@ -231,12 +244,18 @@ pub fn run() -> Result<()> {
                 })
                 .collect()
         };
-        // 右端固定で右上から縦積み(各行=ラベル帯+キャラ)
-        let rects: Vec<(u8, u32, u32, u32, u32)> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, (_, w, _, _, _))| (rotate, lw - w, margin + i as u32 * (ROW_H + GAP), *w, ROW_H))
-            .collect();
+        // 右端固定で右上から縦積み(各行=ラベル帯+キャラ)。非表示中は空にして
+        // 下の「変化したら消す」ロジックで前回分をクリアさせる。
+        let rects: Vec<(u8, u32, u32, u32, u32)> = if visible {
+            rows.iter()
+                .enumerate()
+                .map(|(i, (_, w, _, _, _))| {
+                    (rotate, lw - w, margin + i as u32 * (ROW_H + GAP), *w, ROW_H)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         if rects != drawn {
             // 縮んだ・消えた領域に残像が出ないよう前回分を消し、fbterm/tmuxに再描画させる
@@ -248,6 +267,9 @@ pub fn run() -> Result<()> {
             }
             drawn = rects.clone();
             last_frames.clear();
+
+            // アイコン列の外接矩形を fb-server へ申告し直す(下位レイヤーが避ける)。
+            *fb_rect.lock().unwrap() = bounding_rect(&fb, &rects);
         }
         // 走りアニメーションの位相(300msごとに切り替え)
         let phase = (tick / 2) % 2 == 1;
@@ -339,6 +361,21 @@ pub fn top_margin(lh: u32) -> u32 {
         .map(|rows| (lh + rows - 1) / rows)
         .unwrap_or(16);
     lines * cell + 2
+}
+
+/// 描画中アイコン矩形群(論理座標)の外接矩形を、物理 fb 座標で返す。
+/// アイコンが無ければ None(fb-server 上で領域申告なし = 何も占有しない)。
+fn bounding_rect(
+    fb: &Framebuffer,
+    rects: &[(u8, u32, u32, u32, u32)],
+) -> Option<crate::fb_client::Rect> {
+    let rotate = rects.first()?.0;
+    let x0 = rects.iter().map(|&(_, x, _, _, _)| x).min()?;
+    let y0 = rects.iter().map(|&(_, _, y, _, _)| y).min()?;
+    let x1 = rects.iter().map(|&(_, x, _, w, _)| x + w).max()?;
+    let y1 = rects.iter().map(|&(_, _, y, _, h)| y + h).max()?;
+    let (px, py, pw, ph) = fb.phys_region(rotate, x0, y0, x1 - x0, y1 - y0);
+    Some(crate::fb_client::Rect { x: px, y: py, w: pw, h: ph })
 }
 
 /// tmuxから消えたペインのエントリを掃除する。

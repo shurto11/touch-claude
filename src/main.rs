@@ -1,5 +1,6 @@
 mod daemon;
 mod fb;
+mod fb_client;
 mod font;
 mod hooks;
 mod img;

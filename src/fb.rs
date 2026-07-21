@@ -46,6 +46,12 @@ impl Framebuffer {
         }
     }
 
+    /// 論理座標の矩形(lx,ly,w,h)が占める物理座標の矩形。fb-server の重なり調停は
+    /// 物理 fb 座標で行うため、rect 申告にはこの変換後の値を使う。
+    pub fn phys_region(&self, rotate: u8, lx: u32, ly: u32, w: u32, h: u32) -> (u32, u32, u32, u32) {
+        self.phys_rect(rotate, lx, ly, w, h)
+    }
+
     /// 論理座標の矩形(lx,ly,w,h)が占める物理座標の矩形(x0,y0,bw,bh)
     fn phys_rect(&self, rotate: u8, lx: u32, ly: u32, w: u32, h: u32) -> (u32, u32, u32, u32) {
         let (pw, ph) = (self.width, self.height);
