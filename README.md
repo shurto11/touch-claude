@@ -1,5 +1,12 @@
 # touch-claude
 
+> **廃止済み(2026-09-06)**: この機能は task-var のバー内へ統合しました。
+> いまは `~/ssd/tools/touch/task-var` が、アイコン列と Spotify パネルの間の枠に
+> 同じキャラクターを最大 4 行並べます。Claude Code の hooks も
+> `task-var hook-*` を呼ぶよう差し替え済みで、fb-server の scenes.toml と
+> `~/bin/tmux-autostart` からも touch-claude は外してあります。
+> このリポジトリは記録として残しているだけなので、起動しないでください。
+
 tmux の各ペインで動く Claude Code の状態を、フレームバッファ画面の右上に
 キャラクター(clawd02.png)で可視化するツール。キャラをタッチすると、その
 claude が動くウィンドウ・ペインへ遷移する。
